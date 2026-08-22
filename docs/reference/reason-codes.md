@@ -71,6 +71,7 @@ Codes stored on the steps table, one row per step of a run.
 | Code | Meaning | Ends the object | reason_data keys |
 |---|---|---|---|
 | `STEP_CANCELLED` | cancelled before it finished | yes | - |
+| `STEP_FAILED_EXECUTOR_LOST` | the executor died before the verdict landed | yes | `recovered_by` |
 | `STEP_FAILED_NONZERO_EXIT` | exited non-zero | yes | `exit_code`, `transient` |
 | `STEP_FAILED_SIGNAL` | killed by a signal | yes | `cancelled`, `exit_code`, `signal` |
 | `STEP_FAILED_SPAWN` | the command never started | yes | `argv0`, `errno`, `workdir` |
@@ -459,6 +460,24 @@ wrong inside the step.
 
 What to do next:
 - the run's own reason code says who cancelled it and why
+
+### STEP_FAILED_EXECUTOR_LOST
+
+the executor died before the verdict landed. [step level, ends the object]
+
+The executor running this attempt crashed, or was killed, between starting
+the step and recording what it did. The attempt's own verdict was lost with
+it, so the restart closes the dead attempt with this code instead of
+inventing a result. The step may then be attempted again under its retry
+policy, and the effect contract applies as for any retry: a step runs at
+least once, not exactly once.
+
+What to do next:
+- read the run's events: run.requeued beside this code is the restart closing a crash out
+- the attempt's log file may exist without log metadata; the next attempt writes its own file
+- if the step is not idempotent, deduplicate on PACEQ_IDEMPOTENCY_KEY, which survives the crash
+
+Promised reason_data keys: recovered_by.
 
 ### STEP_FAILED_NONZERO_EXIT
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/a-holm/paceq/internal/faults"
 	"github.com/a-holm/paceq/internal/model"
 	"github.com/a-holm/paceq/internal/reason"
 )
@@ -101,7 +102,7 @@ func (s *Store) ClaimRun(ctx context.Context, runID string, in LeaseInput) (stri
 		case model.RunRunning:
 			expires := now.Add(in.TTL)
 			next = string(state)
-			return finishTransition(tx, func() error {
+			return finishTransition(tx, "claim", func() error {
 				_, err := tx.Exec(`UPDATE runs SET state = 'running',
 					lease_owner = ?, lease_epoch = lease_epoch + 1, lease_expires_at = ?,
 					started_at = ?, updated_at = ?
@@ -121,7 +122,7 @@ func (s *Store) ClaimRun(ctx context.Context, runID string, in LeaseInput) (stri
 				return err
 			}
 			next = string(state)
-			return finishTransition(tx, func() error {
+			return finishTransition(tx, "claim_cancel", func() error {
 				_, err := tx.Exec(`UPDATE runs SET state = 'cancelled',
 					finished_at = ?, reason_code = ?, updated_at = ?
 				WHERE id = ? AND state = 'queued'`,
@@ -241,7 +242,7 @@ func (s *Store) StartStep(ctx context.Context, runID, name string) error {
 			return fmt.Errorf("start step %s of run %s: %w", name, runID, err)
 		}
 
-		return finishTransition(tx, func() error {
+		return finishTransition(tx, "start_step", func() error {
 			_, err := tx.Exec(`UPDATE steps SET state = 'running', attempt = attempt + 1,
 				started_at = ?, finished_at = NULL
 			WHERE run_id = ? AND name = ? AND state = 'pending'`,
@@ -351,7 +352,7 @@ func (s *Store) RecordStepOutcome(ctx context.Context, runID, name string, out S
 			truncated = 1
 		}
 
-		return finishTransition(tx, func() error {
+		return finishTransition(tx, "record_outcome", func() error {
 			_, err := tx.Exec(`UPDATE steps SET state = ?, reason_code = ?, reason_data = ?,
 				exit_code = ?, signal = ?,
 				finished_at = CASE WHEN ? THEN ? ELSE finished_at END,
@@ -441,7 +442,7 @@ func (s *Store) FinishRun(ctx context.Context, runID, owner string, fr FinishRea
 		if data == "" {
 			data = "{}"
 		}
-		if err := finishTransition(tx, func() error {
+		if err := finishTransition(tx, "finish_run", func() error {
 			_, err := tx.Exec(`UPDATE runs SET state = ?, reason_code = ?, reason_data = ?,
 				finished_at = ?, duration_ms = CASE WHEN started_at IS NULL THEN NULL
 					ELSE ? - started_at END,
@@ -504,7 +505,7 @@ func (s *Store) ObserveRunCancel(ctx context.Context, runID, owner, actor string
 		if err := skipPendingStepsTx(tx, runID, now, string(reason.STEPCancelled)); err != nil {
 			return err
 		}
-		return finishTransition(tx, func() error {
+		return finishTransition(tx, "observe_cancel", func() error {
 			_, err := tx.Exec(`UPDATE runs SET state = 'cancelled',
 				finished_at = ?, reason_code = ?, reason_data = ?,
 				lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
@@ -602,7 +603,7 @@ func skipPendingStepsTx(tx *sql.Tx, runID string, now time.Time, code string) er
 		if err != nil {
 			return fmt.Errorf("skip step %s of run %s: %w", name, runID, err)
 		}
-		if err := finishTransition(tx, func() error {
+		if err := finishTransition(tx, "skip_pending", func() error {
 			_, err := tx.Exec(`UPDATE steps SET state = 'skipped', finished_at = ?,
 				reason_code = ?, reason_data = '{}'
 			WHERE run_id = ? AND name = ? AND state = 'pending'`,
@@ -622,10 +623,16 @@ func skipPendingStepsTx(tx *sql.Tx, runID string, now time.Time, code string) er
 // finishTransition pairs the state write with the event write and refuses to
 // commit one without the other. fn performs the UPDATE; if it touched no row,
 // the transition never happened and the event is not written either.
-func finishTransition(tx *sql.Tx, fn func() error, txForEvent *sql.Tx, e RunEvent) error {
+//
+// where names the transition for the crash harness (#75). The fault point
+// between the two writes is the exact window G10 closes: a process killed
+// there loses both writes, because neither was committed. In a build without
+// the pulseq_faults tag the call folds away to nothing.
+func finishTransition(tx *sql.Tx, where string, fn func() error, txForEvent *sql.Tx, e RunEvent) error {
 	if err := fn(); err != nil {
 		return fmt.Errorf("record %s on run %s: %w", e.Kind, e.RunID, err)
 	}
+	faults.Point("M1:transition:after_update:" + where)
 	return appendRunEvent(txForEvent, e)
 }
 
@@ -751,4 +758,116 @@ FROM steps WHERE run_id = ? ORDER BY idx`, runID)
 		return nil, fmt.Errorf("read the steps of run %s: %w", runID, err)
 	}
 	return scanSteps(rows)
+}
+
+// RequeueCrashedRun puts a run whose executor died back in the queue. It is
+// the store half of the restart story the crash harness (#75) proves: a run
+// left running by a SIGKILL is requeued through the machine's own
+// lease_expired transition, never reset behind its back.
+//
+// The refusal is the safety catch. A lease that has not expired yet belongs
+// to a process that may still be alive, and requeuing under it would let two
+// executors drive one run. Only an expired lease counts as evidence that the
+// previous owner is gone; the state directory lock adds its own guarantee on
+// this platform, but the machine's guard does not rely on it.
+//
+// The transition writes what the machine demands: the epoch goes up so any
+// writer from the dead attempt is fenced out, crash_count counts the loss of
+// the executor against the run, and defer_reason records why the requeued run
+// sits waiting (I14). One event row tells the story, in the same transaction.
+func (s *Store) RequeueCrashedRun(ctx context.Context, runID string) error {
+	now := s.clk.Now().UTC()
+
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		run, err := readRunTx(tx, runID)
+		if err != nil {
+			return err
+		}
+		cur, err := model.ParseRunState(run.State)
+		if err != nil {
+			return err
+		}
+
+		expired := !run.LeaseExpiresAt.IsZero() && !run.LeaseExpiresAt.After(now)
+		if cur != model.RunRunning || !expired {
+			return fmt.Errorf("requeue run %s: the lease is not expired"+
+				" (state %s, expires at %s)", runID, run.State, run.LeaseExpiresAt)
+		}
+
+		state, effects, err := model.NextRunState(cur, model.EvLeaseExpired, model.Guards{
+			LeaseValid:      false,
+			CrashBudgetLeft: true,
+		})
+		if err != nil {
+			return fmt.Errorf("requeue run %s: %w", runID, err)
+		}
+		if state != model.RunQueued {
+			// M1 carries no poison budget, so the machine always
+			// requeues here. A refusal to believe that is a bug,
+			// not a state.
+			return fmt.Errorf("requeue run %s: the machine sent a running run to %s", runID, state)
+		}
+
+		return finishTransition(tx, "requeue_crashed", func() error {
+			_, err := tx.Exec(`UPDATE runs SET state = 'queued',
+				lease_owner = NULL, lease_expires_at = NULL,
+				lease_epoch = lease_epoch + 1, crash_count = crash_count + 1,
+				defer_reason = ?, available_at = ?, updated_at = ?
+			WHERE id = ? AND state = 'running'`,
+				model.DeferReasonAfterCrash, now.UnixMilli(), now.UnixMilli(), runID)
+			return err
+		}, tx, RunEvent{
+			RunID: runID, At: now, Kind: emitKind(effects),
+			FromState: string(cur), ToState: string(state),
+			DetailJSON: `{"defer_reason":"` + model.DeferReasonAfterCrash + `"}`,
+		})
+	})
+}
+
+// The fault injection writes. Fsck's negative proofs (#75) plant broken rows
+// behind the machines' backs, and these five statements are the only doors
+// for that: each is named for the exact corruption it writes, and nothing in
+// the engine or the CLI may call them. They sit here, beside the real state
+// writes, so the architecture's one rule stays true: a run or step row only
+// ever changes in this file, even when the change is a deliberate lie.
+
+// plantStepPendingTx flips one step of a terminal run back to pending: the
+// row I2 exists for.
+func plantStepPendingTx(tx *sql.Tx, runID, step string) error {
+	_, err := tx.Exec(`UPDATE steps SET state = 'pending', reason_code = NULL
+WHERE run_id = ? AND name = ?`, runID, step)
+	return err
+}
+
+// plantFirstSucceededStepFailedTx marks a run's first succeeded step failed
+// while the run still says succeeded: the disagreement I10 exists for.
+func plantFirstSucceededStepFailedTx(tx *sql.Tx, runID string) error {
+	_, err := tx.Exec(`UPDATE steps SET state = 'failed'
+WHERE run_id = ? AND state = 'succeeded'`, runID)
+	return err
+}
+
+// plantStepFinishedBeforeStartedTx moves every finished step's end before
+// its beginning: the shape I13 refuses.
+func plantStepFinishedBeforeStartedTx(tx *sql.Tx) error {
+	_, err := tx.Exec(`UPDATE steps SET finished_at = started_at - 1
+WHERE started_at IS NOT NULL AND finished_at IS NOT NULL`)
+	return err
+}
+
+// plantUnexplainedDeferralTx pushes a queued run's availability into the
+// future and clears its defer_reason: a run held back that says no more why.
+// The CHECK constraint refuses this shape, so the caller lifts the checks
+// around the call.
+func plantUnexplainedDeferralTx(tx *sql.Tx, runID string) error {
+	_, err := tx.Exec(`UPDATE runs SET available_at = created_at + 3600000,
+		defer_reason = NULL WHERE id = ?`, runID)
+	return err
+}
+
+// plantUnexplainedTerminalRunTx clears a terminal run's reason code: the
+// catalogue rule swept along with the invariants.
+func plantUnexplainedTerminalRunTx(tx *sql.Tx, runID string) error {
+	_, err := tx.Exec(`UPDATE runs SET reason_code = '' WHERE id = ?`, runID)
+	return err
 }

@@ -75,6 +75,7 @@ var (
 	STEPFailedTimeout          = stepCode("FAILED_TIMEOUT")
 	STEPFailedSpawn            = stepCode("FAILED_SPAWN")
 	STEPFailedSignal           = stepCode("FAILED_SIGNAL")
+	STEPFailedExecutorLost     = stepCode("FAILED_EXECUTOR_LOST")
 	STEPCancelled              = stepCode("CANCELLED")
 )
 
@@ -587,6 +588,23 @@ func newCatalog() map[Code]Entry {
 				"a signal arriving on every step points at the cancel path, not at the steps",
 			},
 			DataKeys: []string{"cancelled", "exit_code", "signal"},
+			Terminal: true,
+		},
+		{
+			Code:  STEPFailedExecutorLost,
+			Level: LevelStep,
+			Short: "the executor died before the verdict landed",
+			Explanation: "The executor running this attempt crashed, or was killed, between starting " +
+				"the step and recording what it did. The attempt's own verdict was lost with it, so " +
+				"the restart closes the dead attempt with this code instead of inventing a result. " +
+				"The step may then be attempted again under its retry policy, and the effect " +
+				"contract applies as for any retry: a step runs at least once, not exactly once.",
+			Remedy: []string{
+				"read the run's events: run.requeued beside this code is the restart closing a crash out",
+				"the attempt's log file may exist without log metadata; the next attempt writes its own file",
+				"if the step is not idempotent, deduplicate on PACEQ_IDEMPOTENCY_KEY, which survives the crash",
+			},
+			DataKeys: []string{"recovered_by"},
 			Terminal: true,
 		},
 		{

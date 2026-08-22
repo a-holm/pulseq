@@ -42,6 +42,12 @@ type Engine struct {
 	// StepTimeoutDefault applies when neither the job nor the step names
 	// a timeout. Zero means runner.DefaultTimeout.
 	StepTimeoutDefault time.Duration
+
+	// LeaseTTL is how long ExecuteRun's claim lasts. Zero means
+	// store.DefaultLeaseTTL. The crash harness sets it short so its
+	// recovery after a SIGKILL does not have to wait out five minutes of
+	// lease nobody will ever renew; production leaves it alone.
+	LeaseTTL time.Duration
 }
 
 func (e *Engine) pollInterval() time.Duration {
