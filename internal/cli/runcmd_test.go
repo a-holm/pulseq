@@ -510,7 +510,7 @@ func finishedRunsFixture(t *testing.T) (dir, newestRun string) {
 		t.Fatalf("start extract: %v", err)
 	}
 	zero := 0
-	if err := s.RecordStepOutcome(ctx, okRun.ID, "extract", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, okRun.ID, "extract", store.StepOutcome{
 		Event:      "step_succeeded",
 		ReasonCode: reason.STEPSucceeded,
 		ExitCode:   &zero,
@@ -546,7 +546,7 @@ func finishedRunsFixture(t *testing.T) (dir, newestRun string) {
 		t.Fatalf("start load: %v", err)
 	}
 	one := 1
-	if err := s.RecordStepOutcome(ctx, badRun.ID, "load", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, badRun.ID, "load", store.StepOutcome{
 		Event:      "step_failed",
 		ReasonCode: reason.STEPFailedNonzeroExit,
 		ExitCode:   &one,
