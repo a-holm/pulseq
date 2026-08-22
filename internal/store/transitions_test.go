@@ -151,7 +151,7 @@ func TestRecordStepOutcomeSuccessStoresTheWholeVerdict(t *testing.T) {
 	}
 	clk.Advance(2 * time.Second)
 
-	err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	_, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event:      "step_succeeded",
 		ReasonCode: reason.STEPSucceeded,
 		ExitCode:   ptr(0),
@@ -202,7 +202,7 @@ func TestRecordStepOutcomeFailureKeepsExitCodeSignalAndTail(t *testing.T) {
 	}
 	clk.Advance(time.Second)
 
-	err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	_, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event:      "step_failed",
 		ReasonCode: reason.STEPFailedTimeout,
 		Signal:     "SIGKILL",
@@ -243,7 +243,7 @@ func TestRecordSkipMovesAPendingStepStraightOut(t *testing.T) {
 	}
 
 	// A skip never ran: no start, no exit code, and its own event.
-	err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	_, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event:      "upstream_failed",
 		ReasonCode: reason.STEPSkippedUpstreamFailed,
 		FinishedAt: clk.Now(),
@@ -277,7 +277,7 @@ func TestRecordOutcomeRefusalWritesNothing(t *testing.T) {
 	// Success on a pending step is an illegal transition: the machine
 	// refuses it, and the refusal moves nothing.
 	before, _ := s.RunEvents(ctx, runID)
-	err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	_, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event:      "step_succeeded",
 		ReasonCode: reason.STEPSucceeded,
 	})
@@ -318,7 +318,7 @@ func TestFinishRunAggregatesThroughTheMachine(t *testing.T) {
 			if tc.failStep {
 				out = store.StepOutcome{Event: "step_failed", ReasonCode: reason.STEPFailedNonzeroExit, ExitCode: ptr(7), FinishedAt: clk.Now()}
 			}
-			if err := s.RecordStepOutcome(ctx, runID, "build", out); err != nil {
+			if _, err := s.RecordStepOutcome(ctx, runID, "build", out); err != nil {
 				t.Fatalf("record: %v", err)
 			}
 			clk.Advance(time.Second)
@@ -379,7 +379,7 @@ func TestFinishRunRefusesAWrongOwner(t *testing.T) {
 	if err := s.StartStep(ctx, runID, "build"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event: "step_succeeded", ReasonCode: reason.STEPSucceeded, ExitCode: ptr(0),
 	}); err != nil {
 		t.Fatalf("record: %v", err)
@@ -406,7 +406,7 @@ func TestObserveRunCancelCarriesTheRequestersActor(t *testing.T) {
 
 	// The step is cancelled first (its process group already killed outside
 	// any transaction), then the run.
-	if err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event: "cancel_observed", ReasonCode: reason.STEPCancelled, FinishedAt: clk.Now(),
 	}); err != nil {
 		t.Fatalf("cancel the step: %v", err)
@@ -496,7 +496,7 @@ func TestEveryTransitionCarriesExactlyOneEvent(t *testing.T) {
 	}
 	transitions++ // step.started
 	expect()
-	if err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event: "step_succeeded", ReasonCode: reason.STEPSucceeded, ExitCode: ptr(0), FinishedAt: clk.Now(),
 	}); err != nil {
 		t.Fatalf("record: %v", err)
@@ -548,7 +548,7 @@ func TestNextRunnableStepHonoursIndexOrderAndUpstream(t *testing.T) {
 	if err := s.StartStep(ctx, runID, "b"); err != nil {
 		t.Fatalf("start b: %v", err)
 	}
-	if err := s.RecordStepOutcome(ctx, runID, "b", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, runID, "b", store.StepOutcome{
 		Event: "step_succeeded", ReasonCode: reason.STEPSucceeded, ExitCode: ptr(0),
 	}); err != nil {
 		t.Fatalf("succeed b: %v", err)

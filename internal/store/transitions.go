@@ -303,7 +303,11 @@ type StepOutcome struct {
 // fails with attempts left goes back to pending for its next attempt, which
 // is the machine's own retry transition; M1 computes no backoff, so the next
 // attempt is immediately runnable.
-func (s *Store) RecordStepOutcome(ctx context.Context, runID, name string, out StepOutcome) error {
+//
+// It reports the state the machine landed the step in: pending means a retry
+// was scheduled and its transaction is committed. The report says what
+// happened only when the error is nil.
+func (s *Store) RecordStepOutcome(ctx context.Context, runID, name string, out StepOutcome) (model.StepState, error) {
 	finishedAt := out.FinishedAt
 	if finishedAt.IsZero() {
 		finishedAt = s.clk.Now().UTC()
@@ -313,7 +317,8 @@ func (s *Store) RecordStepOutcome(ctx context.Context, runID, name string, out S
 		detail = "{}"
 	}
 
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	var landed model.StepState
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		step, err := readStepTx(tx, runID, name)
 		if err != nil {
 			return err
@@ -352,6 +357,7 @@ func (s *Store) RecordStepOutcome(ctx context.Context, runID, name string, out S
 			truncated = 1
 		}
 
+		landed = state
 		return finishTransition(tx, "record_outcome", func() error {
 			_, err := tx.Exec(`UPDATE steps SET state = ?, reason_code = ?, reason_data = ?,
 				exit_code = ?, signal = ?,
@@ -378,6 +384,10 @@ func (s *Store) RecordStepOutcome(ctx context.Context, runID, name string, out S
 			DetailJSON: detail,
 		})
 	})
+	if err != nil {
+		return "", err
+	}
+	return landed, nil
 }
 
 // FinishReason is how a run ends: the reason code the machine validated and

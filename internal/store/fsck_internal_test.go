@@ -18,7 +18,7 @@ func TestFsckFindsNoViolationOnAHealthyDatabase(t *testing.T) {
 	ctx := context.Background()
 	s := internalStore(t)
 	runID := aRunningStepInternal(t, s)
-	if err := s.RecordStepOutcome(ctx, runID, "extract", StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, runID, "extract", StepOutcome{
 		Event:      "step_succeeded",
 		ReasonCode: "STEP_SUCCEEDED",
 	}); err != nil {

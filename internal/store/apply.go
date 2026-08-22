@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/a-holm/paceq/internal/faults"
 	"github.com/a-holm/paceq/internal/id"
 )
 
@@ -70,6 +71,12 @@ func (s *Store) ApplyJobs(ctx context.Context, inputs []JobVersionInput) ([]JobA
 				Version:   version.Version,
 				Created:   created,
 			})
+			// The crash window under apply: the batch's writes so far
+			// are inside one uncommitted transaction, and a kill here
+			// must leave none of them. This is the all-or-nothing half
+			// of the apply promise: no job of the batch can survive
+			// alone.
+			faults.Point("M1:apply:after_job")
 		}
 		return nil
 	})

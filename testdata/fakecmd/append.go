@@ -13,6 +13,11 @@
 //	first-drip <file>  write one effect line, then, on attempt 1 only,
 //	                   keep writing to stdout until the reader goes away
 //	                   or a hard cap passes; any later attempt exits at once
+//	append-until N <file>
+//	                   write one effect line, then exit 75 on every attempt
+//	                   below N and exit 0 from N on; the failing but counted
+//	                   attempt is what puts the engine in the between-attempts
+//	                   window of the crash matrix
 package main
 
 import (
@@ -77,6 +82,25 @@ func main() {
 			die("append needs a file")
 		}
 		appendEffect(args[0])
+
+	case "append-until":
+		if len(args) < 2 {
+			die("append-until needs an attempt number and a file")
+		}
+		succeedFrom, err := strconv.Atoi(args[0])
+		if err != nil || succeedFrom < 1 {
+			die("append-until needs a one based attempt number, got %q", args[0])
+		}
+		appendEffect(args[1])
+		if attempt() < succeedFrom {
+			// This attempt did its work and still fails, so the
+			// engine commits a retry schedule: exactly the state
+			// the between-attempts crash window sits after. From
+			// succeedFrom on the command exits zero and the
+			// restarted run converges.
+			os.Exit(75)
+		}
+		os.Exit(0)
 
 	case "first-drip":
 		if len(args) < 1 {

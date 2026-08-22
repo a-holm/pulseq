@@ -56,7 +56,7 @@ func (e *Engine) Recover(ctx context.Context, runID string) (string, error) {
 			continue
 		}
 		outcome := storeStepOutcomeLost(now, e.Owner)
-		if err := e.Store.RecordStepOutcome(ctx, runID, step.Name, outcome); err != nil {
+		if _, err := e.Store.RecordStepOutcome(ctx, runID, step.Name, outcome); err != nil {
 			return "", fmt.Errorf("recover step %s of run %s: %w", step.Name, runID, err)
 		}
 	}

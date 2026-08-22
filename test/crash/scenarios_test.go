@@ -1,18 +1,27 @@
 package crash
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/a-holm/paceq/internal/store"
+)
 
 // Scenario is one row of the crash matrix. Adding a row is one struct
 // literal; the harness code does not change (issue #75: M2 through M4 extend
 // the matrix without touching the driver).
 //
-// Kind says what the crashing child was doing when it died:
+//	kind         what the crashing child was doing when it died:
 //
 //	materialize  applying the job and materialising the manual trigger.
 //	             The fault points sit between the tick, trigger and run
 //	             writes inside the one transaction.
 //	execute      claiming the run and driving its step. The fault points
 //	             sit in the transition windows and around the step process.
+//	apply        recording a batch of job versions. The fault point sits
+//	             inside the one batch transaction, between two jobs'
+//	             writes.
 type Scenario struct {
 	// Name identifies the row in test output and in the child's selection
 	// environment variable.
@@ -61,6 +70,12 @@ type Scenario struct {
 	// harness requires the finding to be exactly the predicted one before
 	// recovery, and none at all after.
 	TransientFindings []string
+
+	// VerifyCrashed optionally pins the exact state the crashed instant
+	// must show, beyond the common integrity, fsck and chain sweeps. It
+	// runs after those sweeps and before convergence; runID is empty for
+	// rows that died before any run existed.
+	VerifyCrashed func(t *testing.T, ctx context.Context, s *store.Store, ws *workspace, runID string)
 }
 
 // Crash points, named after the window they sit in so a failing row names
@@ -77,6 +92,8 @@ const (
 	beforeExec       = "M1:step:before_exec"
 	underExec        = "M1:step:under_exec"
 	afterLogFinish   = "M1:step:after_log_finish"
+	betweenAttempts  = "M1:step:between_attempts"
+	underApply       = "M1:apply:after_job"
 	requeueCrashedPt = "M1:transition:after_update:requeue_crashed"
 	unknownPoint     = "M1:nowhere:at_all"
 )
@@ -170,6 +187,63 @@ var scenarios = []Scenario{
 		RetryMax:   1,
 		MinEffects: 2, MaxEffects: 2,
 		ExpectRequeue: true, ExpectExecutorLost: true,
+	},
+
+	// The window between attempts: attempt 1 ran, appended its effect,
+	// and failed on purpose; its verdict and the retry schedule are
+	// committed, and the executor dies before attempt 2 starts. The
+	// schedule is durable, so the restart takes attempt 2 exactly once:
+	// two effects, attempts 1 and 2 under one key. No finding: a running
+	// run over a pending retry is what the steps aggregate to.
+	{
+		Name: "between_attempts", KillAt: betweenAttempts, Kind: "execute",
+		RetryMax:   1,
+		MinEffects: 2, MaxEffects: 2,
+		ExpectRequeue: true,
+		VerifyCrashed: func(t *testing.T, ctx context.Context, s *store.Store, ws *workspace, runID string) {
+			detail, err := s.GetRun(ctx, runID)
+			if err != nil {
+				t.Fatalf("read the crashed run %s: %v", runID, err)
+			}
+			if detail.Run.State != "running" {
+				t.Fatalf("between attempts the run is %q, want running", detail.Run.State)
+			}
+			for _, st := range detail.Steps {
+				if st.Name != "only" {
+					continue
+				}
+				if st.State != "pending" {
+					t.Fatalf("between attempts the step is %q, want pending: the committed retry", st.State)
+				}
+				if st.Attempt != 1 || st.MaxAttempts != 2 {
+					t.Fatalf("between attempts the step counts attempt %d of %d, want 1 of 2",
+						st.Attempt, st.MaxAttempts)
+				}
+			}
+		},
+	},
+
+	// The window under apply: a batch of two jobs is one transaction,
+	// and the executor dies after the first job's writes. Nothing may
+	// survive: no version of either job, no finding, a database that
+	// says the apply never started. The restart replays the same batch,
+	// which lands whole and is idempotent after that, and the recovered
+	// catalog then drives a real run to success.
+	{
+		Name: "under_apply", KillAt: underApply, Kind: "apply",
+		MinEffects: 1, MaxEffects: 1,
+		VerifyCrashed: func(t *testing.T, ctx context.Context, s *store.Store, ws *workspace, runID string) {
+			for _, name := range []string{jobName, secondJobName} {
+				versions, err := s.ListJobVersions(ctx, name)
+				if err != nil {
+					t.Fatalf("list the versions of %s after the killed apply: %v", name, err)
+				}
+				if len(versions) != 0 {
+					t.Fatalf("a kill inside the apply transaction left %d versions of %s, want 0: the batch must roll back whole",
+						len(versions), name)
+				}
+			}
+		},
 	},
 }
 

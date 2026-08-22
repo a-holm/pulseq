@@ -116,7 +116,7 @@ func (e *Engine) skipPending(ctx context.Context, runID string) error {
 	}
 	now := e.Clock.Now()
 	for _, p := range pending {
-		err := e.Store.RecordStepOutcome(ctx, runID, p.Name, store.StepOutcome{
+		_, err := e.Store.RecordStepOutcome(ctx, runID, p.Name, store.StepOutcome{
 			Event:      string(model.EvUpstreamFailed),
 			ReasonCode: reason.STEPSkippedUpstreamFailed,
 			FinishedAt: now,
@@ -273,8 +273,16 @@ func (e *Engine) runStep(ctx context.Context, run store.Run, name string, st spe
 		})
 	}
 
-	if err := e.Store.RecordStepOutcome(ctx, run.ID, name, outcome); err != nil {
+	state, err := e.Store.RecordStepOutcome(ctx, run.ID, name, outcome)
+	if err != nil {
 		return fail(fmt.Errorf("record the verdict: %w", err))
+	}
+	if state == model.StepPending {
+		// The crash window between attempts: the failed attempt's
+		// verdict and its retry schedule are committed, and the next
+		// attempt has not started. A process killed here leaves a
+		// durable retry that the restart must pick up exactly once.
+		faults.Point("M1:step:between_attempts")
 	}
 	return runDeadlineHit && result.Outcome == runner.TimedOut, nil
 }

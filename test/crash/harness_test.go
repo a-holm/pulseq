@@ -33,6 +33,10 @@ const (
 
 	jobName = "crashjob"
 
+	// secondJobName is the second job of the under_apply row's batch: a
+	// kill between the two jobs' writes must leave neither of them.
+	secondJobName = "crashjob-second"
+
 	childTimeout = "90s" // a wedged child fails instead of hanging CI
 
 	// crashLeaseTTL is the lease a child claims with when it is armed to

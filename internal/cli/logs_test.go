@@ -125,7 +125,7 @@ func finishWithSink(t *testing.T, s *store.Store, root logsink.Root, runID, step
 		t.Fatalf("finish the sink of %s attempt %d: %v", step, attempt, err)
 	}
 	out.LogMeta = store.LogMeta{RelPath: sink.RelPath(), Bytes: bytes, Truncated: truncated, ErrorTail: tail}
-	if err := s.RecordStepOutcome(ctx, runID, step, out); err != nil {
+	if _, err := s.RecordStepOutcome(ctx, runID, step, out); err != nil {
 		t.Fatalf("record %s attempt %d: %v", step, attempt, err)
 	}
 }
@@ -477,7 +477,7 @@ func TestLogsFollowShowsNewLinesAndExitsWhenTheRunEnds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finish the live sink: %v", err)
 	}
-	if err := s.RecordStepOutcome(ctx, live.ID, "notify", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, live.ID, "notify", store.StepOutcome{
 		Event: "step_failed", ReasonCode: reason.STEPFailedNonzeroExit,
 		ExitCode: ptr(2), FinishedAt: time.Now(),
 		LogMeta: store.LogMeta{RelPath: sink.RelPath(), Bytes: bytes, Truncated: truncated, ErrorTail: tail},

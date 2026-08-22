@@ -161,7 +161,7 @@ func TestRequeueCrashedRunRefusesATerminalRun(t *testing.T) {
 	if err := s.StartStep(ctx, runID, "only"); err != nil {
 		t.Fatalf("start the step: %v", err)
 	}
-	if err := s.RecordStepOutcome(ctx, runID, "only", StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, runID, "only", StepOutcome{
 		Event:      string(model.EvStepSucceeded),
 		ReasonCode: reason.STEPSucceeded,
 	}); err != nil {

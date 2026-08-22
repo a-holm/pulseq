@@ -98,7 +98,7 @@ BEGIN SELECT RAISE(ABORT, 'injected failure inside the verdict write'); END`)
 		t.Fatalf("read events before the injected failure: %v", err)
 	}
 
-	err = s.RecordStepOutcome(ctx, runID, "extract", StepOutcome{
+	_, err = s.RecordStepOutcome(ctx, runID, "extract", StepOutcome{
 		Event:      "step_failed",
 		ReasonCode: reason.STEPFailedNonzeroExit,
 		ExitCode:   intPtr(1),

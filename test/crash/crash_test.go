@@ -59,6 +59,10 @@ func runRow(t *testing.T, sc Scenario) {
 		waitOrphansGone(t, ws.EffectFile)
 	}
 
+	if sc.VerifyCrashed != nil {
+		sc.VerifyCrashed(t, ctx, s, ws, runID)
+	}
+
 	finalState, finalRunID := converge(t, ctx, s, ws, sc, runID)
 	if !contains(sc.allowedFinalStates(), finalState) {
 		t.Fatalf("%s: the restart converged to %q, want one of %v",
@@ -86,13 +90,41 @@ func converge(t *testing.T, ctx context.Context, s *store.Store, ws *workspace,
 
 	switch sc.Kind {
 	case "materialize":
-		res, err := s.MaterializeManualTrigger(ctx, store.ManualTriggerInput{
-			JobName: jobName, Actor: "crash-restart",
-		})
+		finalRunID = rematerialise(t, ctx, s)
+
+	case "apply":
+		// The batch that died mid transaction is replayed exactly as
+		// it was built: the first replay lands whole, with a new
+		// version for every job of the batch, and the second finds
+		// everything already there and invents nothing.
+		inputs := applyBatchInputs(appendFixture(t), ws.EffectFile)
+		res, err := s.ApplyJobs(ctx, inputs)
 		if err != nil {
-			t.Fatalf("re-materialise the trigger after the crash: %v", err)
+			t.Fatalf("re-apply the batch after the crash: %v", err)
 		}
-		finalRunID = res.Run.ID
+		for _, r := range res {
+			if !r.Created {
+				t.Fatalf("the replayed apply found %s version %d already there, want created: nothing survived the killed batch",
+					r.JobName, r.Version)
+			}
+		}
+		again, err := s.ApplyJobs(ctx, inputs)
+		if err != nil {
+			t.Fatalf("replay the applied batch: %v", err)
+		}
+		for _, r := range again {
+			if r.Created {
+				t.Fatalf("replaying the batch invented another version of %s", r.JobName)
+			}
+		}
+		versions, err := s.ListJobVersions(ctx, jobName)
+		if err != nil {
+			t.Fatalf("list the versions of %s after convergence: %v", jobName, err)
+		}
+		if len(versions) != 1 {
+			t.Fatalf("%s carries %d versions after the converged replays, want exactly 1", jobName, len(versions))
+		}
+		finalRunID = rematerialise(t, ctx, s)
 
 	case "execute":
 		state, err := eng.Recover(ctx, runID)
@@ -113,6 +145,20 @@ func converge(t *testing.T, ctx context.Context, s *store.Store, ws *workspace,
 		t.Fatalf("execute run %s after recovery: %v", finalRunID, err)
 	}
 	return state, finalRunID
+}
+
+// rematerialise takes the retried decision after a materialisation or apply
+// crash: the trigger is applied again and returns the run it creates.
+func rematerialise(t *testing.T, ctx context.Context, s *store.Store) string {
+	t.Helper()
+
+	res, err := s.MaterializeManualTrigger(ctx, store.ManualTriggerInput{
+		JobName: jobName, Actor: "crash-restart",
+	})
+	if err != nil {
+		t.Fatalf("re-materialise the trigger after the crash: %v", err)
+	}
+	return res.Run.ID
 }
 
 func isTerminal(state string) bool {
@@ -380,7 +426,14 @@ func TestChildProcess(t *testing.T) {
 		return
 	}
 
-	applyJob(t, s, sc, os.Getenv(envAppend), ws.EffectFile)
+	if sc.Kind == "apply" {
+		inputs := applyBatchInputs(os.Getenv(envAppend), ws.EffectFile)
+		if _, err := s.ApplyJobs(ctx, inputs); err != nil {
+			t.Fatalf("apply the batch: %v", err)
+		}
+	} else {
+		applyJob(t, s, sc, os.Getenv(envAppend), ws.EffectFile)
+	}
 
 	res, err := s.MaterializeManualTrigger(ctx, store.ManualTriggerInput{
 		JobName: jobName, Actor: "crash-harness",
@@ -407,30 +460,70 @@ func TestChildProcess(t *testing.T) {
 
 // applyJob records the frozen job version a scenario runs. One step, whose
 // whole effect is one line in the workspace's effect file; the drip variant
-// keeps attempt 1 alive so an under-exec kill lands inside execution.
+// keeps attempt 1 alive so an under-exec kill lands inside execution, and
+// the append-until variant fails attempt 1 after its effect so an engine
+// retry schedule exists to crash between.
 func applyJob(t *testing.T, s *store.Store, sc Scenario, appendBin, effectFile string) {
 	t.Helper()
 
-	mode := "append"
-	if sc.WaitsForOrphan {
-		mode = "first-drip"
-	}
-	quote := func(s string) string { return strconv.Quote(s) }
-	step := fmt.Sprintf(`{"name":"only","run":[%s,%s,%s],"shell":false`,
-		quote(appendBin), quote(mode), quote(effectFile))
-	if sc.RetryMax > 0 {
-		step += fmt.Sprintf(`,"retry":{"max":%d}`, sc.RetryMax)
-	}
-	step += "}"
-	spec := fmt.Sprintf(`{"schema":"paceq.job.v1","name":%q,"max_concurrent":1,`+
-		`"timeout_ms":60000,"steps":[%s]}`, jobName, step)
-
+	spec := jobSpec(jobName, "only", stepArgv(sc, appendBin, effectFile), sc.RetryMax)
 	if _, _, err := s.UpsertJobVersion(context.Background(), store.JobVersionInput{
 		JobName:  jobName,
 		SpecHash: "sha256:crash-" + sc.Name,
 		SpecJSON: spec,
 	}); err != nil {
 		t.Fatalf("record the job version: %v", err)
+	}
+}
+
+// stepArgv names the command one scenario's step runs.
+func stepArgv(sc Scenario, appendBin, effectFile string) []string {
+	switch {
+	case sc.KillAt == betweenAttempts:
+		// Attempt 1 appends its line and exits 75; attempt 2 exits 0.
+		return []string{appendBin, "append-until", "2", effectFile}
+	case sc.WaitsForOrphan:
+		return []string{appendBin, "first-drip", effectFile}
+	default:
+		return []string{appendBin, "append", effectFile}
+	}
+}
+
+// jobSpec renders the canonical frozen spec of a one step job from its name,
+// command and retry budget. Both the single job rows and the batch row build
+// their versions through it, so every spec the harness freezes has the same
+// shape.
+func jobSpec(name, stepName string, argv []string, retryMax int) string {
+	parts := make([]string, len(argv))
+	for i, a := range argv {
+		parts[i] = strconv.Quote(a)
+	}
+	step := fmt.Sprintf(`{"name":%q,"run":[%s],"shell":false`, stepName, strings.Join(parts, ","))
+	if retryMax > 0 {
+		step += fmt.Sprintf(`,"retry":{"max":%d}`, retryMax)
+	}
+	step += "}"
+	return fmt.Sprintf(`{"schema":"paceq.job.v1","name":%q,"max_concurrent":1,`+
+		`"timeout_ms":60000,"steps":[%s]}`, name, step)
+}
+
+// applyBatchInputs is the two job batch the under_apply row crashes inside.
+// The crashing child and the restarting parent both build it from the same
+// frozen facts, so the restart replays the very batch that died. Neither job
+// carries retries: the second never runs at all, and the first runs once
+// after the recovered catalog lands.
+func applyBatchInputs(appendBin, effectFile string) []store.JobVersionInput {
+	return []store.JobVersionInput{
+		{
+			JobName:  jobName,
+			SpecHash: "sha256:crash-apply-" + jobName,
+			SpecJSON: jobSpec(jobName, "only", []string{appendBin, "append", effectFile}, 0),
+		},
+		{
+			JobName:  secondJobName,
+			SpecHash: "sha256:crash-apply-" + secondJobName,
+			SpecJSON: jobSpec(secondJobName, "second-only", []string{appendBin, "append", effectFile}, 0),
+		},
 	}
 }
 
