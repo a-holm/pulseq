@@ -108,7 +108,7 @@ FROM runs r LEFT JOIN steps s ON s.run_id = r.id ORDER BY r.id`)
 	}
 	for id, r := range byRun {
 		want := model.RunAggregate(r.steps)
-		if string(want) != r.state {
+		if string(want) != r.state && !unclaimedWork(want, r.state) {
 			out = append(out, Violation{
 				Check:   "I10",
 				Subject: "run " + id,
@@ -230,4 +230,16 @@ WHERE prev_to IS NOT NULL AND COALESCE(from_state, '<start>') <> prev_to`)
 	}
 
 	return out, nil
+}
+
+// unclaimedWork is the one shape the aggregate cannot name: steps that are
+// still pending describe both a run nobody has claimed yet (queued) and a
+// claimed run whose first step has not started (running). Both are correct,
+// so the aggregate saying running is allowed to sit beside either stored
+// state. Everything else must match exactly: a failed or cancelled aggregate
+// under a succeeded row is the drift this check exists to catch. The crash
+// harness (#75) holds the queued half of this: a run materialised and not yet
+// claimed must sweep clean.
+func unclaimedWork(want model.RunState, have string) bool {
+	return want == model.RunRunning && have == "queued"
 }

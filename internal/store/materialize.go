@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/a-holm/paceq/internal/faults"
 	"github.com/a-holm/paceq/internal/id"
 	"github.com/a-holm/paceq/internal/spec"
 )
@@ -107,11 +108,13 @@ WHERE j.name = ?`, in.JobName).Scan(&versionID, &specJSON)
 VALUES (?, 'manual', ?, ?, ?, 'triggered', 1)`, tickID, in.JobName, at, at); err != nil {
 			return fmt.Errorf("record the manual tick for job %s: %w", in.JobName, err)
 		}
+		faults.Point("M1:materialize:after_tick")
 		if _, err := tx.Exec(`INSERT INTO triggers
 (id, tick_id, job_name, params_json, created_at, outcome)
 VALUES (?, ?, ?, ?, ?, 'accepted')`, triggerID, tickID, in.JobName, params, at); err != nil {
 			return fmt.Errorf("record the manual trigger for job %s: %w", in.JobName, err)
 		}
+		faults.Point("M1:materialize:after_trigger")
 
 		run := Run{
 			ID:           runID,
@@ -139,6 +142,7 @@ VALUES (?, ?, ?, ?, 'manual', 'queued', ?, ?, 1, ?, ?)`,
 		if err := insertSteps(tx, run.ID, job.Steps); err != nil {
 			return err
 		}
+		faults.Point("M1:materialize:after_run")
 
 		out.Run = run
 		return appendRunEvent(tx, RunEvent{

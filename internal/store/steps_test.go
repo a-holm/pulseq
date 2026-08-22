@@ -54,7 +54,7 @@ func TestErrorTailOutlivesTheLogFile(t *testing.T) {
 	s, _ := coreStore(t)
 	runID := aRunningStep(t, s)
 
-	err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	_, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event:      "step_failed",
 		ReasonCode: reason.STEPFailedTimeout,
 		LogMeta: store.LogMeta{
@@ -80,7 +80,7 @@ func TestRecordStepOutcomeStoresTheDuration(t *testing.T) {
 	runID := aRunningStep(t, s)
 	clk.Advance(1500 * time.Millisecond)
 
-	if err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
+	if _, err := s.RecordStepOutcome(ctx, runID, "build", store.StepOutcome{
 		Event:      "step_succeeded",
 		ReasonCode: reason.STEPSucceeded,
 		ExitCode:   ptr(0),

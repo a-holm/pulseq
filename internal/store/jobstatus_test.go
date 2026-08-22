@@ -57,7 +57,7 @@ func seedRun(t *testing.T, s *store.Store, job, versionID string, steps []store.
 				ReasonCode: reason.STEPFailedNonzeroExit,
 			}
 		}
-		if err := s.RecordStepOutcome(ctx, run.ID, step.Name, out); err != nil {
+		if _, err := s.RecordStepOutcome(ctx, run.ID, step.Name, out); err != nil {
 			t.Fatalf("record %s of run %s: %v", step.Name, run.ID, err)
 		}
 	}
